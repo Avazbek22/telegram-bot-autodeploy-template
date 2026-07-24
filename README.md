@@ -290,7 +290,7 @@ sudo systemctl enable --now my-telegram-bot-deploy.timer
 - Fast-forward-only deployment with a project-specific `flock`.
 - Smoke testing before replacement and strict health stabilization afterward.
 - Transactional Git, image, container, and systemd rollback.
-- SHA-pinned GitHub Actions and weekly Dependabot updates.
+- GitHub Actions pinned to reviewed commit SHAs.
 
 Anyone who can merge to `main` can deploy code to the VPS. Enable branch
 protection, require CI, review dependency changes, and keep Ubuntu and Docker
