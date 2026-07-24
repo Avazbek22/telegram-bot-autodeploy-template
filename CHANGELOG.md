@@ -9,8 +9,7 @@ All notable changes to this project are documented here.
 - Compose validation can use `.env-example` explicitly without creating `.env`.
 - Installer and manual rollback fake-command regression coverage now includes
   successful, repeated, and transactional failure paths.
-- GitHub Actions are SHA-pinned, and Dependabot tracks Python, Docker, and
-  workflow dependencies.
+- GitHub Actions are pinned to reviewed commit SHAs.
 
 ## [0.1.0] - 2026-07-24
 
