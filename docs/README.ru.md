@@ -22,7 +22,8 @@ flowchart LR
 ```
 
 Push в feature branch запускает CI, но не deployment. VPS самостоятельно
-проверяет только `origin/main` примерно раз в две минуты.
+проверяет только `origin/main` примерно раз в две минуты, поэтому deployment
+после push происходит не мгновенно. GitHub Actions не подключается к VPS по SSH.
 
 ## Создание репозитория
 
@@ -41,6 +42,11 @@ cd YOUR_REPOSITORY
 Installer установит Docker/Git/Compose/flock, создаст `.env` только при его
 отсутствии, безопасно запросит пустой `BOT_TOKEN`, соберёт и проверит image,
 запустит контейнер и включит уникальный systemd timer.
+
+Создание GitHub template не устанавливает deployment автоматически:
+`install.sh` нужно один раз запустить для каждого нового проекта. Владелец
+репозитория вручную настраивает `origin`, включает Template Repository, branch
+protection и обязательный CI.
 
 ## Локальная разработка
 
@@ -70,6 +76,16 @@ python -c "import main"
 `.env` одинаково используется локально, в Docker, smoke tests, повторном
 installer и rollback. Он не попадает в Git и Docker image. **Никогда не
 коммитьте `.env`.**
+
+`.env-example` используется только как образец и для статической проверки:
+
+```bash
+ENV_FILE=.env-example docker compose config --quiet
+```
+
+Эта команда не создаёт `.env`. `ENV_FILE` — техническая возможность для
+checks; production default остаётся `.env`, и реальный container/deployment
+без него должен завершиться ошибкой.
 
 Основные параметры: `BOT_TOKEN`, `APP_NAME`, `LOG_LEVEL`, `DATA_DIR`,
 `LOGS_DIR`, polling timeouts и интервалы health heartbeat. Installer преобразует
@@ -154,6 +170,11 @@ capabilities, с `no-new-privileges` и ephemeral marker
 включите branch protection и review. Один VPS не даёт failover или zero-downtime
 гарантий. Обновляйте Ubuntu/Docker и немедленно перевыпускайте скомпрометированный
 token.
+
+Shell regression tests используют fake `git`, `docker`, `systemctl` и `flock`:
+они не обращаются к Telegram и не заменяют проверку настоящего VPS. Перед
+production выполните [checklist для чистой Ubuntu VPS](VPS_ACCEPTANCE.md),
+желательно с отдельными тестовыми ботами.
 
 Полное описание архитектуры, customization checklist, contributing и license
 находятся в [основном README](../README.md).

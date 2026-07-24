@@ -10,6 +10,32 @@ fail() {
   exit 1
 }
 
+test_compose_config_without_env() {
+  local root="$TEST_ROOT/compose-config"
+  local rendered
+  mkdir -p "$root"
+  cp "$REPOSITORY_ROOT/docker-compose.yml" "$root/docker-compose.yml"
+  cp "$REPOSITORY_ROOT/.env-example" "$root/.env-example"
+  printf 'COMPOSE_CHECK_SENTINEL=from-example\n' >>"$root/.env-example"
+
+  ENV_FILE=.env-example APP_SLUG=compose-check \
+    docker compose -f "$root/docker-compose.yml" config --quiet
+  rendered="$(
+    ENV_FILE=.env-example APP_SLUG=compose-check \
+      docker compose -f "$root/docker-compose.yml" config
+  )"
+  grep -q 'COMPOSE_CHECK_SENTINEL: from-example' <<<"$rendered" ||
+    fail "Compose check did not use the explicitly selected example file"
+  [[ ! -e "$root/.env" ]] ||
+    fail "Compose config created an unexpected .env"
+  if APP_SLUG=compose-check docker compose \
+    -f "$root/docker-compose.yml" config --quiet >/dev/null 2>&1; then
+    fail "Production Compose default unexpectedly worked without .env"
+  fi
+  grep -Fq "\${ENV_FILE:-.env}" "$root/docker-compose.yml" ||
+    fail "Production Compose default is no longer .env"
+}
+
 make_fake_commands() {
   local bin="$1"
   mkdir -p "$bin"
@@ -19,7 +45,11 @@ set -Eeuo pipefail
 printf 'git %s\n' "$*" >>"$FAKE_COMMAND_LOG"
 args="$*"
 case "$args" in
-  *"status --porcelain --untracked-files=no"*) exit 0 ;;
+  *"status --porcelain --untracked-files=no"*)
+    if [[ "${FAKE_DIRTY:-0}" == "1" ]]; then
+      printf ' M main.py\n'
+    fi
+    ;;
   *"branch --show-current"*) printf '%s\n' "${FAKE_BRANCH:-main}" ;;
   *"remote get-url origin"*) printf '%s\n' 'https://example.invalid/repository.git' ;;
   *"rev-parse HEAD"*) cat "$FAKE_STATE_DIR/head" ;;
@@ -31,7 +61,15 @@ case "$args" in
     grep '^scripts/systemd/' "$FAKE_STATE_DIR/changes" || :
     ;;
   *"diff --name-only"*) cat "$FAKE_STATE_DIR/changes" ;;
-  *"checkout -q -B"*) printf '%s\n' "${!#}" >"$FAKE_STATE_DIR/head" ;;
+  *"checkout -q -B"*)
+    checkout_target="${!#}"
+    if [[ "${FAKE_FAIL_CHECKOUT_ON:-}" == "$checkout_target" &&
+      ! -f "$FAKE_STATE_DIR/checkout-failed-once" ]]; then
+      : >"$FAKE_STATE_DIR/checkout-failed-once"
+      exit 1
+    fi
+    printf '%s\n' "$checkout_target" >"$FAKE_STATE_DIR/head"
+    ;;
   *"pull --ff-only origin main"*) cat "$FAKE_STATE_DIR/target" >"$FAKE_STATE_DIR/head" ;;
   *"cat-file -e"*) exit 0 ;;
   *"fetch"*) exit 0 ;;
@@ -46,22 +84,55 @@ case "$args" in
   "info") exit 0 ;;
   "compose version") exit 0 ;;
   "image inspect "*)
+    image_name="${args#image inspect }"
+    if [[ "${FAKE_MISSING_ROLLBACK_IMAGE:-0}" == "1" &&
+      "$image_name" == *":rollback" ]]; then
+      exit 1
+    fi
+    if [[ "${FAKE_INITIAL_INSTALL:-0}" == "1" &&
+      "$image_name" == *":local" &&
+      ! -f "$FAKE_STATE_DIR/image-built" ]]; then
+      exit 1
+    fi
     [[ "${FAKE_NO_IMAGE:-0}" != "1" ]]
     ;;
   "image tag "*) exit 0 ;;
-  "inspect --format {{.State.Running}}"*) printf '%s\n' "${FAKE_RUNNING:-true}" ;;
+  "inspect --format {{.State.Running}}"*)
+    if [[ "${FAKE_INITIAL_INSTALL:-0}" == "1" &&
+      ! -f "$FAKE_STATE_DIR/up-count" ]]; then
+      printf 'false\n'
+    else
+      printf '%s\n' "${FAKE_RUNNING:-true}"
+    fi
+    ;;
   "inspect --format {{.RestartCount}}"*) printf '%s\n' "${FAKE_RESTARTS:-0}" ;;
   "inspect --format "*"State.Health"*)
-    printf '%s\n' "${FAKE_HEALTH:-healthy}"
+    up_count=0
+    if [[ -f "$FAKE_STATE_DIR/up-count" ]]; then
+      up_count="$(<"$FAKE_STATE_DIR/up-count")"
+    fi
+    if [[ -n "${FAKE_CANDIDATE_HEALTH:-}" && "$up_count" == "1" ]]; then
+      printf '%s\n' "$FAKE_CANDIDATE_HEALTH"
+    else
+      printf '%s\n' "${FAKE_HEALTH:-healthy}"
+    fi
     ;;
   "compose "*" ps -q "*) printf '%s\n' fake-container ;;
   "compose "*" build "*)
     [[ "${FAKE_FAIL_BUILD:-0}" != "1" ]]
+    : >"$FAKE_STATE_DIR/image-built"
     ;;
   "compose "*" run "*)
     [[ "${FAKE_FAIL_SMOKE:-0}" != "1" ]]
     ;;
-  "compose "*" up -d "*) exit 0 ;;
+  "compose "*" up -d "*)
+    up_count=0
+    if [[ -f "$FAKE_STATE_DIR/up-count" ]]; then
+      up_count="$(<"$FAKE_STATE_DIR/up-count")"
+    fi
+    printf '%s\n' "$((up_count + 1))" >"$FAKE_STATE_DIR/up-count"
+    exit 0
+    ;;
   "compose "*" stop "*) exit 0 ;;
   "compose "*)
     exit 0
@@ -72,6 +143,11 @@ SH
 #!/usr/bin/env bash
 set -Eeuo pipefail
 printf 'systemctl %s\n' "$*" >>"$FAKE_COMMAND_LOG"
+if [[ "${FAKE_FAIL_SYSTEMD_ONCE:-0}" == "1" &&
+  ! -f "$FAKE_STATE_DIR/systemctl-failed-once" ]]; then
+  : >"$FAKE_STATE_DIR/systemctl-failed-once"
+  exit 1
+fi
 [[ "${FAKE_FAIL_SYSTEMD:-0}" != "1" ]]
 SH
   cat >"$bin/flock" <<'SH'
@@ -135,11 +211,63 @@ run_deploy() {
   fi
 }
 
+prepare_install_case() {
+  local root="$1" app_name="${2:-Example Bot}"
+  prepare_case "$root" "$app_name"
+  cp "$REPOSITORY_ROOT/install.sh" "$root/install.sh"
+  : >"$root/install-runs.log"
+}
+
+run_installer() {
+  local root="$1"
+  shift
+  if ! env PATH="$root/bin:$PATH" INSTALL_DIR="$root" \
+    INSTALL_SKIP_PREREQUISITES=1 SYSTEMD_DIR="$root/systemd" \
+    LOCK_FILE="$root/lock/example-bot-deploy.lock" \
+    SYSTEMCTL=systemctl FAKE_STATE_DIR="$root" \
+    FAKE_COMMAND_LOG="$root/commands.log" HEALTH_ATTEMPTS=4 \
+    HEALTH_STABLE_COUNT=2 HEALTH_INTERVAL_SECONDS=0 \
+    "$@" bash "$root/install.sh" </dev/null >>"$root/install-runs.log" 2>&1; then
+    cat "$root/install-runs.log" >&2
+    return 1
+  fi
+}
+
+prepare_manual_case() {
+  local root="$1"
+  prepare_case "$root"
+  printf 'new-commit\n' >"$root/head"
+  printf 'old-commit\n' >"$root/data/.rollback-commit"
+  printf 'previous service\n' >"$root/systemd/example-bot-deploy.service"
+  printf 'previous timer\n' >"$root/systemd/example-bot-deploy.timer"
+  printf 'state\n' >"$root/data/keep"
+  printf 'log\n' >"$root/logs/keep"
+  printf 'CUSTOM_SETTING=keep\n' >>"$root/.env"
+  : >"$root/manual-runs.log"
+}
+
+run_manual_rollback() {
+  local root="$1"
+  shift
+  if ! env PATH="$root/bin:$PATH" ROOT_DIR="$root" \
+    LOCK_FILE="$root/lock/example-bot-deploy.lock" \
+    SYSTEMD_DIR="$root/systemd" SYSTEMCTL=systemctl \
+    FAKE_STATE_DIR="$root" FAKE_COMMAND_LOG="$root/commands.log" \
+    HEALTH_ATTEMPTS=4 HEALTH_STABLE_COUNT=2 HEALTH_INTERVAL_SECONDS=0 \
+    "$@" bash "$REPOSITORY_ROOT/scripts/rollback.sh" --yes \
+    </dev/null >>"$root/manual-runs.log" 2>&1; then
+    cat "$root/manual-runs.log" >&2
+    return 1
+  fi
+}
+
 expect_failed() {
   if "$@"; then
     fail "command unexpectedly succeeded: $*"
   fi
 }
+
+test_compose_config_without_env
 
 success="$TEST_ROOT/success"
 prepare_case "$success"
@@ -251,36 +379,181 @@ grep -q 'second-project:local' "$names_b/commands.log"
 [[ -f "$names_b/lock/second-project-deploy.lock" ]]
 
 manual="$TEST_ROOT/manual"
-prepare_case "$manual"
-printf 'new-commit\n' >"$manual/head"
-printf 'old-commit\n' >"$manual/data/.rollback-commit"
-env PATH="$manual/bin:$PATH" ROOT_DIR="$manual" \
-  LOCK_FILE="$manual/lock/example-bot-deploy.lock" \
-  SYSTEMD_DIR="$manual/systemd" SYSTEMCTL=systemctl \
-  FAKE_STATE_DIR="$manual" FAKE_COMMAND_LOG="$manual/commands.log" \
-  HEALTH_ATTEMPTS=4 HEALTH_STABLE_COUNT=2 HEALTH_INTERVAL_SECONDS=0 \
-  bash "$REPOSITORY_ROOT/scripts/rollback.sh" --yes
+prepare_manual_case "$manual"
+run_manual_rollback "$manual"
 [[ "$(<"$manual/head")" == "old-commit" ]] || fail "manual rollback did not restore commit"
 grep -q 'Manual rollback successful' "$manual/logs/"*-deploy-*.log
 
-installer="$TEST_ROOT/installer"
-prepare_case "$installer"
-cp "$REPOSITORY_ROOT/install.sh" "$installer/install.sh"
-cp "$REPOSITORY_ROOT/scripts/"*.sh "$installer/scripts/"
-printf 'CUSTOM_SETTING=keep\n' >>"$installer/.env"
-printf 'state\n' >"$installer/data/keep"
-printf 'log\n' >"$installer/logs/keep"
-expect_failed env PATH="$installer/bin:$PATH" INSTALL_DIR="$installer" \
-  INSTALL_SKIP_PREREQUISITES=1 SYSTEMD_DIR="$installer/systemd" \
-  LOCK_FILE="$installer/lock/example-bot-deploy.lock" \
-  SYSTEMCTL=systemctl FAKE_STATE_DIR="$installer" \
-  FAKE_COMMAND_LOG="$installer/commands.log" HEALTH_ATTEMPTS=4 \
-  HEALTH_STABLE_COUNT=2 HEALTH_INTERVAL_SECONDS=0 FAKE_FAIL_BUILD=1 \
-  bash "$installer/install.sh"
-[[ "$(<"$installer/head")" == "old-commit" ]] || fail "installer did not restore commit"
-grep -q '^CUSTOM_SETTING=keep$' "$installer/.env"
-[[ -f "$installer/data/keep" && -f "$installer/logs/keep" ]] ||
-  fail "installer removed persistent files"
+manual_checkout_failure="$TEST_ROOT/manual-checkout-failure"
+prepare_manual_case "$manual_checkout_failure"
+expect_failed run_manual_rollback "$manual_checkout_failure" \
+  FAKE_FAIL_CHECKOUT_ON=old-commit
+[[ "$(<"$manual_checkout_failure/head")" == "new-commit" ]] ||
+  fail "manual checkout failure did not restore the current commit"
+grep -q 'image tag example-bot:pre-manual-rollback example-bot:local' \
+  "$manual_checkout_failure/commands.log"
+grep -q 'previous service' \
+  "$manual_checkout_failure/systemd/example-bot-deploy.service"
+grep -q ' up -d ' "$manual_checkout_failure/commands.log" ||
+  fail "manual checkout failure did not recreate the original container"
+
+manual_systemd_failure="$TEST_ROOT/manual-systemd-failure"
+prepare_manual_case "$manual_systemd_failure"
+expect_failed run_manual_rollback "$manual_systemd_failure" \
+  FAKE_FAIL_SYSTEMD_ONCE=1
+[[ "$(<"$manual_systemd_failure/head")" == "new-commit" ]] ||
+  fail "manual systemd failure did not restore the current commit"
+grep -q 'previous service' \
+  "$manual_systemd_failure/systemd/example-bot-deploy.service"
+grep -q 'previous timer' \
+  "$manual_systemd_failure/systemd/example-bot-deploy.timer"
+grep -q 'image tag example-bot:pre-manual-rollback example-bot:local' \
+  "$manual_systemd_failure/commands.log"
+
+manual_unhealthy="$TEST_ROOT/manual-unhealthy"
+prepare_manual_case "$manual_unhealthy"
+expect_failed run_manual_rollback "$manual_unhealthy" \
+  FAKE_CANDIDATE_HEALTH=unhealthy
+[[ "$(<"$manual_unhealthy/head")" == "new-commit" ]] ||
+  fail "unhealthy manual rollback did not restore the current commit"
+[[ "$(<"$manual_unhealthy/up-count")" == "2" ]] ||
+  fail "unhealthy manual rollback did not restore the running container"
+grep -q 'image tag example-bot:pre-manual-rollback example-bot:local' \
+  "$manual_unhealthy/commands.log"
+grep -q 'previous timer' "$manual_unhealthy/systemd/example-bot-deploy.timer"
+grep -q '^CUSTOM_SETTING=keep$' "$manual_unhealthy/.env"
+[[ -f "$manual_unhealthy/data/keep" && -f "$manual_unhealthy/logs/keep" ]] ||
+  fail "manual rollback failure removed persistent files"
+
+manual_locked="$TEST_ROOT/manual-locked"
+prepare_manual_case "$manual_locked"
+expect_failed run_manual_rollback "$manual_locked" FAKE_LOCKED=1
+[[ "$(<"$manual_locked/head")" == "new-commit" ]] ||
+  fail "locked manual rollback changed Git"
+grep -q 'Another deployment or rollback is active' "$manual_locked/manual-runs.log"
+
+manual_dirty="$TEST_ROOT/manual-dirty"
+prepare_manual_case "$manual_dirty"
+expect_failed run_manual_rollback "$manual_dirty" FAKE_DIRTY=1
+[[ "$(<"$manual_dirty/head")" == "new-commit" ]] ||
+  fail "dirty manual rollback changed Git"
+grep -q 'Tracked local changes detected' "$manual_dirty/manual-runs.log"
+
+manual_missing_commit="$TEST_ROOT/manual-missing-commit"
+prepare_manual_case "$manual_missing_commit"
+rm -f "$manual_missing_commit/data/.rollback-commit"
+expect_failed run_manual_rollback "$manual_missing_commit"
+grep -q 'No rollback commit is recorded' "$manual_missing_commit/manual-runs.log"
+
+manual_missing_image="$TEST_ROOT/manual-missing-image"
+prepare_manual_case "$manual_missing_image"
+expect_failed run_manual_rollback "$manual_missing_image" \
+  FAKE_MISSING_ROLLBACK_IMAGE=1
+if grep -q 'checkout -q -B main old-commit' "$manual_missing_image/commands.log"; then
+  fail "manual rollback changed Git without a rollback image"
+fi
+
+initial_install="$TEST_ROOT/initial-install"
+prepare_install_case "$initial_install" "Initial Bot"
+rm -f "$initial_install/.env"
+run_installer "$initial_install" \
+  BOT_TOKEN=123456789:abcdefghijklmnopqrstuvwxyzABCDE \
+  FAKE_INITIAL_INSTALL=1
+[[ "$(<"$initial_install/head")" == "new-commit" ]] ||
+  fail "initial installer did not update the checkout"
+grep -q '^BOT_TOKEN=123456789:abcdefghijklmnopqrstuvwxyzABCDE$' \
+  "$initial_install/.env"
+[[ -f "$initial_install/systemd/initial-install-deploy.service" ]]
+[[ -f "$initial_install/systemd/initial-install-deploy.timer" ]]
+grep -q 'systemctl enable --now initial-install-deploy.timer' \
+  "$initial_install/commands.log"
+if [[ -f "$initial_install/data/.rollback-commit" ]]; then
+  fail "initial install recorded a nonexistent previous deployment"
+fi
+
+repeated_install="$TEST_ROOT/repeated-install"
+prepare_install_case "$repeated_install"
+printf 'CUSTOM_SETTING=keep\n' >>"$repeated_install/.env"
+cp "$repeated_install/.env" "$repeated_install/env-before"
+printf 'state\n' >"$repeated_install/data/keep"
+printf 'log\n' >"$repeated_install/logs/keep"
+run_installer "$repeated_install"
+run_installer "$repeated_install"
+cmp "$repeated_install/env-before" "$repeated_install/.env"
+[[ -f "$repeated_install/data/keep" && -f "$repeated_install/logs/keep" ]] ||
+  fail "repeated installer removed persistent files"
+if grep -q 'Telegram BOT_TOKEN:' "$repeated_install/install-runs.log"; then
+  fail "repeated installer prompted for an existing BOT_TOKEN"
+fi
+[[ "$(<"$repeated_install/up-count")" == "2" ]] ||
+  fail "repeated installer did not complete both idempotent runs"
+[[ "$(find "$repeated_install/systemd" -maxdepth 1 -type f \
+  -name 'example-bot-deploy.*' | wc -l)" == "2" ]] ||
+  fail "repeated installer created duplicate systemd units"
+grep -q 'image tag example-bot:local example-bot:install-rollback' \
+  "$repeated_install/commands.log"
+grep -q 'image tag example-bot:install-rollback example-bot:rollback' \
+  "$repeated_install/commands.log"
+[[ "$(<"$repeated_install/data/.rollback-commit")" == "new-commit" ]] ||
+  fail "repeated installer did not record the previous commit"
+
+installer_build_failure="$TEST_ROOT/installer-build-failure"
+prepare_install_case "$installer_build_failure"
+printf 'CUSTOM_SETTING=keep\n' >>"$installer_build_failure/.env"
+printf 'state\n' >"$installer_build_failure/data/keep"
+printf 'log\n' >"$installer_build_failure/logs/keep"
+expect_failed run_installer "$installer_build_failure" FAKE_FAIL_BUILD=1
+[[ "$(<"$installer_build_failure/head")" == "old-commit" ]] ||
+  fail "installer build failure did not restore Git"
+grep -q 'image tag example-bot:install-rollback example-bot:local' \
+  "$installer_build_failure/commands.log"
+grep -q '^CUSTOM_SETTING=keep$' "$installer_build_failure/.env"
+[[ -f "$installer_build_failure/data/keep" &&
+  -f "$installer_build_failure/logs/keep" ]] ||
+  fail "installer build failure removed persistent files"
+
+installer_smoke_failure="$TEST_ROOT/installer-smoke-failure"
+prepare_install_case "$installer_smoke_failure"
+expect_failed run_installer "$installer_smoke_failure" FAKE_FAIL_SMOKE=1
+[[ "$(<"$installer_smoke_failure/head")" == "old-commit" ]] ||
+  fail "installer smoke failure did not restore Git"
+if grep -q ' up -d ' "$installer_smoke_failure/commands.log"; then
+  fail "installer smoke failure replaced the container"
+fi
+
+installer_unhealthy="$TEST_ROOT/installer-unhealthy"
+prepare_install_case "$installer_unhealthy"
+expect_failed run_installer "$installer_unhealthy" \
+  FAKE_CANDIDATE_HEALTH=unhealthy
+[[ "$(<"$installer_unhealthy/head")" == "old-commit" ]] ||
+  fail "unhealthy installer did not restore Git"
+[[ "$(<"$installer_unhealthy/up-count")" == "2" ]] ||
+  fail "unhealthy installer did not restore the previous container"
+grep -q 'image tag example-bot:install-rollback example-bot:local' \
+  "$installer_unhealthy/commands.log"
+
+installer_health_none="$TEST_ROOT/installer-health-none"
+prepare_install_case "$installer_health_none"
+expect_failed run_installer "$installer_health_none" FAKE_CANDIDATE_HEALTH=none
+[[ "$(<"$installer_health_none/head")" == "old-commit" ]] ||
+  fail "installer accepted health=none"
+
+installer_systemd_failure="$TEST_ROOT/installer-systemd-failure"
+prepare_install_case "$installer_systemd_failure"
+printf 'previous service\n' \
+  >"$installer_systemd_failure/systemd/example-bot-deploy.service"
+printf 'previous timer\n' \
+  >"$installer_systemd_failure/systemd/example-bot-deploy.timer"
+expect_failed run_installer "$installer_systemd_failure" \
+  FAKE_FAIL_SYSTEMD_ONCE=1
+[[ "$(<"$installer_systemd_failure/head")" == "old-commit" ]] ||
+  fail "installer systemd failure did not restore Git"
+grep -q 'previous service' \
+  "$installer_systemd_failure/systemd/example-bot-deploy.service"
+grep -q 'previous timer' \
+  "$installer_systemd_failure/systemd/example-bot-deploy.timer"
+[[ "$(<"$installer_systemd_failure/up-count")" == "2" ]] ||
+  fail "installer systemd failure did not restore the previous container"
 
 # shellcheck disable=SC2016
 if grep -REn -- 'rm[[:space:]]+-rf[[:space:]]+(/|"\$ROOT_DIR"|\$ROOT_DIR)' \

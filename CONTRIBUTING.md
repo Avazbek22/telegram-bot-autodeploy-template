@@ -16,10 +16,12 @@ python -m ruff format --check .
 python -m pytest
 shellcheck install.sh scripts/*.sh tests/shell/*.sh
 bash tests/shell/test-deploy.sh
+ENV_FILE=.env-example APP_SLUG=compose-check docker compose config --quiet
 ```
 
 Production shell changes should include a fake-command test for success and
-failure paths. Never use a real Telegram token in tests or issue reports.
+failure paths. The Compose check must not create `.env`. Never use a real
+Telegram token in tests or issue reports.
 
 Open a focused pull request and explain deployment or rollback implications.
 By contributing, you agree that your contribution is licensed under the MIT

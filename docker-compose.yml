@@ -9,7 +9,7 @@ services:
     init: true
     user: "10001:10001"
     env_file:
-      - .env
+      - ${ENV_FILE:-.env}
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs

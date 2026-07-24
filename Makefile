@@ -19,6 +19,6 @@ shellcheck:
 	bash tests/shell/test-deploy.sh
 
 compose-check:
-	APP_SLUG=telegram-bot docker compose config --quiet
+	ENV_FILE=.env-example APP_SLUG=telegram-bot docker compose config --quiet
 
 check: lint test shellcheck compose-check

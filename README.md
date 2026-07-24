@@ -57,6 +57,8 @@ flowchart LR
 ```
 
 The VPS pulls from GitHub. GitHub Actions never needs SSH access or VPS secrets.
+Detection is timer-based rather than immediate: a push normally reaches the VPS
+on the next check, approximately two minutes later.
 
 ## Use this template
 
@@ -69,7 +71,11 @@ The VPS pulls from GitHub. GitHub Actions never needs SSH access or VPS secrets.
 5. Run `sudo`-capable `./install.sh` once on the VPS.
 
 A push or merge to `main` is deployed by the VPS timer. A push to a feature
-branch runs CI but is not deployed.
+branch runs CI but is not deployed. Creating a repository from the template
+does not install anything on a server: run `install.sh` once for every generated
+project. The repository owner also configures `origin`, enables the Template
+Repository setting, and enables branch protection and required CI checks
+manually.
 
 ## Quick start
 
@@ -122,6 +128,13 @@ token, make network calls, register handlers, start threads, or create files.
 `.env` is used unchanged by local Python, Docker Compose, candidate smoke tests,
 repeated installs, deployments, and rollbacks. It is ignored by Git and by the
 Docker build context. **Never commit `.env`.**
+
+`.env-example` is only a documented sample and the input for static Compose
+validation. `ENV_FILE=.env-example docker compose config` can validate the
+Compose model in a fresh checkout without creating `.env`. The `ENV_FILE`
+override is a technical check mechanism; production defaults to `.env`, and a
+real container or production deployment still fails closed when `.env` is
+missing.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -287,6 +300,12 @@ run `sudo FORCE_DEPLOY=1 APP_SLUG=my-telegram-bot ./scripts/deploy.sh`.
   require CI, review dependency changes, and limit repository write access.
 - Rotate tokens after suspected exposure and keep Ubuntu and Docker patched.
 
+The shell deployment, installer, and rollback regression tests use fake
+`git`, `docker`, `systemctl`, and `flock` commands. They exercise transaction
+logic without contacting Telegram or changing the host. Before production use,
+run the [clean Ubuntu VPS acceptance checklist](docs/VPS_ACCEPTANCE.md) with
+dedicated test bots.
+
 ## Customization checklist
 
 - [ ] Set the generated repository's description and topics shown above.
@@ -298,6 +317,7 @@ run `sudo FORCE_DEPLOY=1 APP_SLUG=my-telegram-bot ./scripts/deploy.sh`.
 - [ ] Protect `main` and require the CI workflow.
 - [ ] Review `SECURITY.md`, ownership, and contact information.
 - [ ] Test a deployment and `scripts/rollback.sh` before relying on the bot.
+- [ ] Complete `docs/VPS_ACCEPTANCE.md` on a clean Ubuntu 22.04/24.04 VPS.
 
 ## Limitations
 
@@ -308,6 +328,8 @@ run `sudo FORCE_DEPLOY=1 APP_SLUG=my-telegram-bot ./scripts/deploy.sh`.
   handoff.
 - Docker image rollback cannot undo external side effects introduced by custom
   handlers.
+- Automated tests do not replace an acceptance run against a real Docker and
+  systemd installation on the target Ubuntu VPS.
 
 ## Contributing
 
