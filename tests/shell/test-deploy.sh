@@ -123,6 +123,10 @@ case "$args" in
     : >"$FAKE_STATE_DIR/image-built"
     ;;
   "compose "*" run "*)
+    if [[ "$args" == *" --no-build "* ]]; then
+      printf 'unknown flag: --no-build\n' >&2
+      exit 2
+    fi
     [[ "${FAKE_FAIL_SMOKE:-0}" != "1" ]]
     ;;
   "compose "*" up -d "*)
@@ -274,6 +278,19 @@ prepare_case "$success"
 run_deploy "$success"
 [[ "$(<"$success/head")" == "new-commit" ]] || fail "successful deploy did not advance Git"
 grep -q 'Deployment successful commit=new-commit' "$success/logs/"*-deploy-*.log
+grep -Eq ' compose .* run --rm --no-deps [^ ]+ sh -ec ' \
+  "$success/commands.log" ||
+  fail "candidate image was not smoke-tested with the expected Compose options"
+if grep -Fq -- '--no-build' "$success/commands.log"; then
+  fail "smoke test used the unsupported Compose run --no-build flag"
+fi
+if ! awk '
+  / compose .* run --rm --no-deps / { smoke_passed = 1 }
+  / compose .* up -d / && !smoke_passed { exit 1 }
+  END { if (!smoke_passed) exit 1 }
+' "$success/commands.log"; then
+  fail "container replacement started before the candidate image smoke test"
+fi
 
 noop="$TEST_ROOT/noop"
 prepare_case "$noop"

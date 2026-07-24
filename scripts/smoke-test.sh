@@ -12,7 +12,7 @@ output_file="$(mktemp)"
 trap 'rm -f "$output_file"' EXIT
 
 if ! compose -p "$COMPOSE_PROJECT" -f "$ROOT_DIR/docker-compose.yml" \
-  run --rm --no-deps --no-build "$SERVICE_KEY" sh -ec '
+  run --rm --no-deps "$SERVICE_KEY" sh -ec '
     python -c "import main"
     python -c "import app.application, app.healthcheck, app.logging_setup, app.settings"
     python -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 12) else 1)"
