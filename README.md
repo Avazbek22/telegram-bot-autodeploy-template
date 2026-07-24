@@ -1,98 +1,104 @@
-# Telegram Bot Autodeploy Template
+<div align="center">
 
-Write bot handlers, deploy once, then update your single-VPS Telegram bot by
-pushing to `main`.
+# 🤖 Telegram Bot Autodeploy Template
 
-**Suggested GitHub description:** Production-ready Python Telegram bot template
-for a single VPS: Docker, CI, push-to-main auto-deploy, health checks and
-automatic rollback.
+**Write handlers. Run one installer. Ship every update with `git push`.**
 
-Suggested topics: `telegram-bot`, `telegram-bot-template`, `python`, `docker`,
-`vps`, `auto-deploy`, `systemd`, `devops`, `self-hosted`.
+A small, production-minded Python template for Telegram bots running on one
+Ubuntu VPS — with Docker, health checks, automatic deploys, and rollback already
+wired together.
 
-[Русская документация](docs/README.ru.md)
+[Русская версия](docs/README.ru.md) ·
+[VPS acceptance checklist](docs/VPS_ACCEPTANCE.md) ·
+[Contributing](CONTRIBUTING.md)
 
-## Features
+</div>
 
-- Python 3.12 container; Python 3.11, 3.12, and 3.13 development/CI support.
-- `pyTelegramBotAPI` long polling with import-safe, explicit lifecycle code.
-- Non-root, read-only Docker Compose service with no Linux capabilities.
-- Telegram `getMe` candidate validation and strict heartbeat health checks.
-- A project-specific systemd timer that follows only `origin/main`.
-- Fast-forward deployment, failed-SHA suppression, and automatic rollback.
-- Idempotent Ubuntu 22.04/24.04 installer that preserves configuration and data.
-- Ruff, pytest, ShellCheck, Docker, and fake production-flow checks in one CI
-  workflow.
+---
 
-## What this template is
+Most Telegram bot examples stop at “it works on my laptop.” This template takes
+care of the less exciting part too: getting a small bot onto a VPS, keeping it
+healthy, and updating it safely.
 
-This is a deliberately small foundation for one long-polling Telegram bot in
-one Docker container on one Ubuntu VPS. The included bot responds to `/start`,
-`/help`, and echoes ordinary text. Replace or extend those handlers with your
-own application logic.
+You focus on handlers. The template handles the container.
 
-## What this template is not
+## Why use it?
 
-It is not a multi-host platform and does not include a database, Redis, a task
-queue, webhooks, a reverse proxy, Kubernetes, payments, or an admin panel. Add
-infrastructure in the repository created from this template only when your bot
-actually needs it.
+- **Start with a real bot, not an empty scaffold.** `/start`, `/help`, and text
+  echo are ready to run and easy to replace.
+- **Deploy once.** Run `install.sh` on your VPS and get a dedicated Docker
+  service plus a systemd deployment timer.
+- **Update with normal Git.** Push or merge to `main`; the VPS notices the new
+  commit in about two minutes.
+- **Fail safely.** A broken build, failed smoke test, or unhealthy container
+  restores the previous commit, image, and running bot.
+- **Share one VPS.** Every generated project gets its own image, container,
+  lock, logs, and systemd units.
+- **Keep the stack small.** No database, Redis, webhook server, reverse proxy,
+  Kubernetes, or control panel unless your bot truly needs one.
 
-## Architecture
+> One VPS. One container. No deployment platform to babysit.
 
-```mermaid
-flowchart LR
-    A[Push or merge to main] --> B[systemd timer]
-    B --> C[Fetch origin/main]
-    C --> D{Fast-forward and new SHA?}
-    D -->|No| E[No-op]
-    D -->|Docs only| F[Update checkout only]
-    D -->|Runtime change| G[Build candidate image]
-    G --> H[Import + Python + Settings + getMe smoke]
-    H -->|Pass| I[Replace bot service]
-    I --> J[Multiple stable healthy states]
-    J -->|Pass| K[Success]
-    H -->|Fail| L[Restore Git + image + container]
-    J -->|Fail| L
-```
+## Is this a good fit?
 
-The VPS pulls from GitHub. GitHub Actions never needs SSH access or VPS secrets.
-Detection is timer-based rather than immediate: a push normally reaches the VPS
-on the next check, approximately two minutes later.
+| Great fit | Look for a larger platform if you need |
+| --- | --- |
+| Personal bots and small community bots | Multiple application servers |
+| Internal tools and simple automations | Zero-downtime multi-host failover |
+| Long polling on one Ubuntu VPS | Webhooks or HTTP ingress |
+| A straightforward Git-based release flow | Databases, workers, or distributed queues |
 
-## Use this template
+## Start here
 
-1. In this source repository, open **GitHub Settings** and select
-   **Template repository**.
-2. Click **Use this template**, create your own repository, and keep `main` as
-   its production branch.
-3. Clone your generated repository and customize `app/handlers/common.py`.
-4. Push it to GitHub, then clone that repository on the VPS.
-5. Run `sudo`-capable `./install.sh` once on the VPS.
+### 1. Create your repository
 
-A push or merge to `main` is deployed by the VPS timer. A push to a feature
-branch runs CI but is not deployed. Creating a repository from the template
-does not install anything on a server: run `install.sh` once for every generated
-project. The repository owner also configures `origin`, enables the Template
-Repository setting, and enables branch protection and required CI checks
-manually.
-
-## Quick start
-
-Local:
+Mark this repository as **Settings → Template repository**, then click
+**Use this template**. Clone the generated repository — keep the placeholders
+below when maintaining the template itself:
 
 ```bash
 git clone https://github.com/YOUR_ACCOUNT/YOUR_REPOSITORY.git
 cd YOUR_REPOSITORY
+```
+
+Creating a repository from the template does not install anything on a server.
+Each generated project needs its own one-time VPS installation.
+
+### 2. Run the example bot locally
+
+```bash
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements-dev.txt
 cp .env-example .env
-# Set BOT_TOKEN in .env, then:
+```
+
+Add the token from BotFather to `.env`, then start the bot:
+
+```bash
 python main.py
 ```
 
-Ubuntu VPS:
+Try `/start`, `/help`, and a regular text message.
+
+### 3. Add your handlers
+
+The friendly place to begin is
+[`app/handlers/common.py`](app/handlers/common.py):
+
+```python
+@bot.message_handler(commands=["ping"])
+def handle_ping(message: Message) -> None:
+    bot.reply_to(message, "pong")
+```
+
+Keep registration inside `register_handlers(bot)`. Imports stay safe: simply
+running `python -c "import main"` never needs a token, contacts Telegram, starts
+threads, registers handlers, or creates files.
+
+### 4. Install it on an Ubuntu VPS
+
+Clone your generated repository on Ubuntu 22.04 or 24.04 and run:
 
 ```bash
 git clone https://github.com/YOUR_ACCOUNT/YOUR_REPOSITORY.git
@@ -100,87 +106,114 @@ cd YOUR_REPOSITORY
 ./install.sh
 ```
 
-The installer creates `.env` only when absent, prompts for an empty token
-without echoing it, builds and validates the image, starts the bot, and prints
-the exact unique service and timer names.
+The installer:
 
-## Local development
+1. installs Git, Docker, Compose, `flock`, and CA certificates when needed;
+2. creates `.env` only if it does not exist;
+3. asks for an empty `BOT_TOKEN` without displaying it;
+4. builds and smoke-tests the image;
+5. starts the bot and waits for stable health;
+6. enables a project-specific deployment timer.
 
-The `.env` loader is intentionally small: it accepts simple `KEY=VALUE` lines,
-does not execute shell syntax, and lets process environment variables override
-file values.
+Existing `.env`, `data/`, and `logs/` survive repeated installer runs.
+
+### 5. From now on, just push
 
 ```bash
-python -m pip install -r requirements-dev.txt
-cp .env-example .env
-python main.py
+git add .
+git commit -m "feat: add my bot feature"
+git push origin main
+```
 
+The VPS checks `origin/main` approximately every two minutes. GitHub Actions
+does not SSH into the server and needs no VPS secrets. Feature branches run CI
+but are not deployed.
+
+## What happens after a push?
+
+1. The project-specific systemd timer fetches `origin/main`.
+2. A fast-forward and clean checkout are required.
+3. Runtime changes build a candidate Docker image.
+4. The candidate checks imports, Python 3.12, settings, and Telegram `getMe`.
+5. Only a valid candidate replaces the current bot.
+6. Several consecutive `running=true`, restart count `0`, and
+   `health=healthy` observations are required.
+
+If any step fails, the previous Git commit, image, systemd units, and container
+state are restored. The failed SHA is remembered so the timer does not retry the
+same broken release forever.
+
+Documentation-only changes update the checkout without rebuilding or
+restarting the bot.
+
+## A few useful commands
+
+Replace `my-telegram-bot` with the application slug printed by `install.sh`.
+
+```bash
+# Is it running?
+APP_SLUG=my-telegram-bot docker compose ps
+
+# Follow bot logs
+APP_SLUG=my-telegram-bot docker compose logs -f --tail=200 bot
+
+# Check the deployment timer
+sudo systemctl status my-telegram-bot-deploy.timer
+
+# Ask for an update immediately
+sudo APP_SLUG=my-telegram-bot ./scripts/deploy.sh
+
+# Return to the previous healthy release
+sudo APP_SLUG=my-telegram-bot ./scripts/rollback.sh
+```
+
+## Configuration without surprises
+
+`.env` is the real local and production configuration. It is ignored by Git,
+excluded from the Docker image, preserved during deployment, and should stay
+mode `0600`.
+
+| Variable | Default | What it controls |
+| --- | --- | --- |
+| `BOT_TOKEN` | empty | Required only when the bot actually starts |
+| `APP_NAME` | repository directory | Unique project name on the VPS |
+| `LOG_LEVEL` | `INFO` | Python log level |
+| `DATA_DIR` | `data` | Persistent bot data |
+| `LOGS_DIR` | `logs` | Rotated application logs |
+| `POLLING_TIMEOUT_SECONDS` | `20` | Telegram polling timeout |
+| `LONG_POLLING_TIMEOUT_SECONDS` | `30` | Telegram long-poll timeout |
+| `HEALTH_HEARTBEAT_SECONDS` | `25` | Health marker refresh interval |
+| `HEALTH_MAX_AGE_SECONDS` | `120` | Maximum healthy marker age |
+
+`APP_NAME` becomes a safe lowercase slug and separates generated projects on
+the same VPS.
+
+`.env-example` is a sample, not a production fallback. CI uses
+`ENV_FILE=.env-example docker compose config` only to validate Compose without
+creating a real `.env`. Normal Docker and production deployment still require
+`.env`.
+
+<details>
+<summary><strong>Local checks before pushing</strong></summary>
+
+```bash
 python -m ruff check .
 python -m ruff format --check .
 python -m pytest
+shellcheck install.sh scripts/*.sh tests/shell/*.sh
+bash tests/shell/test-deploy.sh
+ENV_FILE=.env-example APP_SLUG=compose-check docker compose config --quiet
 ```
 
-`python -c "import main"` is a safe smoke test. It does not read a required
-token, make network calls, register handlers, start threads, or create files.
+The shell deployment tests use fake `git`, `docker`, `systemctl`, and `flock`
+commands. They do not call Telegram or modify the host.
 
-## Configuration
+</details>
 
-`.env` is used unchanged by local Python, Docker Compose, candidate smoke tests,
-repeated installs, deployments, and rollbacks. It is ignored by Git and by the
-Docker build context. **Never commit `.env`.**
+<details>
+<summary><strong>Manual Docker setup</strong></summary>
 
-`.env-example` is only a documented sample and the input for static Compose
-validation. `ENV_FILE=.env-example docker compose config` can validate the
-Compose model in a fresh checkout without creating `.env`. The `ENV_FILE`
-override is a technical check mechanism; production defaults to `.env`, and a
-real container or production deployment still fails closed when `.env` is
-missing.
-
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `BOT_TOKEN` | empty | Required at startup; obtain it from BotFather. |
-| `APP_NAME` | repository directory | Source for the unique lowercase app slug. |
-| `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`. |
-| `DATA_DIR` | `data` | Persistent application data directory. |
-| `LOGS_DIR` | `logs` | Persistent logs and daily rotated `bot.log`. |
-| `POLLING_TIMEOUT_SECONDS` | `20` | pyTelegramBotAPI polling timeout. |
-| `LONG_POLLING_TIMEOUT_SECONDS` | `30` | Telegram long-poll timeout. |
-| `HEALTH_HEARTBEAT_SECONDS` | `25` | `/tmp` marker refresh interval. |
-| `HEALTH_MAX_AGE_SECONDS` | `120` | Maximum healthy marker age. |
-
-Choose an `APP_NAME` that becomes 3–63 characters of `a-z`, `0-9`, and hyphens.
-The installer derives a safe slug and uses it for the image, Compose project,
-lock, deployment state, logs, and systemd units. Different generated
-repositories can therefore run on the same VPS without naming conflicts.
-
-## Add handlers
-
-Edit `app/handlers/common.py`. Register additional decorated handler functions
-inside `register_handlers(bot)`, or import registration functions from new
-modules and call them there. Keep registration out of module-level code: the
-application calls it only after directories and Telegram `getMe` have
-succeeded.
-
-Avoid showing raw exception text to Telegram users. Log a generic operational
-message and let the file logger retain the traceback.
-
-## Initial installation on an Ubuntu VPS
-
-Requirements are Ubuntu 22.04 or 24.04, a checkout on `main`, an `origin`
-remote, outbound HTTPS, and a user with root or sudo access.
-
-```bash
-git clone https://github.com/YOUR_ACCOUNT/YOUR_REPOSITORY.git
-cd YOUR_REPOSITORY
-./install.sh
-```
-
-The installer installs Git, Docker, Compose, `flock`, and CA certificates when
-needed. It uses sudo for Docker consistently when the current account cannot
-access the socket. Existing `.env`, `data/`, and `logs/` are never replaced.
-Tracked local changes stop installation. Updates use `git pull --ff-only`.
-
-For a manual Docker-only setup:
+If you intentionally do not want the installer or automatic deployment:
 
 ```bash
 cp .env-example .env
@@ -193,149 +226,113 @@ bash scripts/smoke-test.sh
 docker compose up -d --no-deps bot
 ```
 
-## Automatic deployment
+</details>
 
-About every two minutes, `<app-slug>-deploy.timer` starts a one-shot service.
-The deploy script takes a project-specific `flock`, rejects a dirty checkout,
-fetches only `origin/main`, verifies a fast-forward, and compares exact SHAs.
+<details>
+<summary><strong>When something goes wrong</strong></summary>
 
-Documentation-only changes advance the checkout without building or restarting
-the container. Runtime changes tag the current image for rollback, build a
-candidate, run imports, verify Python 3.12 and settings, and call Telegram
-`getMe`. Only then is the `bot` service recreated. Success requires several
-consecutive observations of `running=true`, restart count `0`, and
-`health=healthy`. `none`, `starting`, `unhealthy`, and unknown states fail.
+**Invalid `BOT_TOKEN`**
 
-If a SHA fails, Git, the image, systemd units, and the previous running state
-are restored. That SHA is recorded in `data/.failed-deploy-sha` and is not
-retried until a newer commit arrives. Set `FORCE_DEPLOY=1` only for a deliberate
-manual retry.
+Correct `.env` and run the manual deploy again. Candidate validation calls
+`getMe` before replacing the current container and redacts token-shaped output.
 
-## Rollback
+**Docker permission denied**
 
-Every successful runtime deployment records the previous commit and retains its
-image. A manual rollback asks for explicit confirmation:
+Use a sudo-capable account. The installer consistently selects direct Docker
+access or `sudo docker`.
 
-```bash
-sudo ./scripts/rollback.sh
-```
+**Dirty Git checkout**
 
-Automation may use:
+Commit and push tracked changes. Deployment refuses local edits because safely
+restoring Git would otherwise be impossible.
+
+**Container is unhealthy**
 
 ```bash
-sudo ./scripts/rollback.sh --yes
+APP_SLUG=my-telegram-bot docker compose logs --tail=200 bot
+sudo tail -n 200 logs/my-telegram-bot-deploy-$(date -u +%F).log
 ```
 
-The script uses the same lock as deployment, shows both commits and the image,
-recreates only the bot service, and requires strict stable health. It never
-removes `.env`, `data/`, or `logs/`.
+Also confirm that `data/` and `logs/` belong to UID/GID `10001`.
 
-## Operations
+**Telegram error 409**
 
-Replace `my-telegram-bot` with the app slug printed by `install.sh`.
+The same token is being polled elsewhere. One Telegram token must not run in two
+bot processes or containers at the same time.
+
+**A failed SHA is skipped**
+
+Fix the release and push a newer commit. For a reviewed transient failure only:
 
 ```bash
-# Container status
-APP_SLUG=my-telegram-bot docker compose ps
-
-# Application and deployment logs
-APP_SLUG=my-telegram-bot docker compose logs -f --tail=200 bot
-sudo tail -f logs/my-telegram-bot-deploy-$(date -u +%F).log
-
-# Restart only the bot
-APP_SLUG=my-telegram-bot docker compose restart bot
-
-# Manual deploy check
-sudo APP_SLUG=my-telegram-bot ./scripts/deploy.sh
-
-# Manual rollback
-sudo APP_SLUG=my-telegram-bot ./scripts/rollback.sh
-
-# Timer and last deployment status
-sudo systemctl status my-telegram-bot-deploy.timer
-sudo systemctl status my-telegram-bot-deploy.service
-sudo journalctl -u my-telegram-bot-deploy.service -n 100 --no-pager
+sudo FORCE_DEPLOY=1 APP_SLUG=my-telegram-bot ./scripts/deploy.sh
 ```
 
-## Troubleshooting
+**Timer is not loaded**
 
-**Invalid `BOT_TOKEN`.** Correct `.env`, keep it mode `0600`, then run the
-manual deploy. The candidate smoke test verifies `getMe` before replacement and
-redacts token-shaped output.
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now my-telegram-bot-deploy.timer
+```
 
-**Docker permission denied.** Run through a sudo-capable account. The installer
-automatically selects either direct Docker access or `sudo docker`. For manual
-Compose commands, prefix them with `sudo` if needed.
+</details>
 
-**Dirty Git checkout.** Move application customization into a commit and push
-it. Deployment intentionally refuses tracked local edits because rollback could
-otherwise destroy them.
+<details>
+<summary><strong>Production safeguards</strong></summary>
 
-**`health=unhealthy` (or `none`).** Inspect `docker compose logs bot` and
-`logs/bot.log`. Confirm `data/` and `logs/` are owned by UID/GID `10001`. A
-missing healthcheck is an error, not a success.
+- Python 3.12 slim production image; Python 3.11–3.13 tested in CI.
+- Non-root UID/GID `10001`.
+- Read-only root filesystem with writable mounts only for `data/` and `logs/`.
+- All Linux capabilities dropped and `no-new-privileges` enabled.
+- Ephemeral heartbeat marker at `/tmp/telegram-bot.healthy`.
+- Daily UTC log rotation with 60 backups.
+- Token redaction and no tracebacks in container stdout.
+- Fast-forward-only deployment with a project-specific `flock`.
+- Smoke testing before replacement and strict health stabilization afterward.
+- Transactional Git, image, container, and systemd rollback.
+- SHA-pinned GitHub Actions and weekly Dependabot updates.
 
-**Duplicate polling / Telegram 409.** One Telegram token must not be polled by
-two containers or processes at once. Stop the other deployment before starting
-this one.
+Anyone who can merge to `main` can deploy code to the VPS. Enable branch
+protection, require CI, review dependency changes, and keep Ubuntu and Docker
+patched.
 
-**Failed SHA is skipped.** Inspect `data/.failed-deploy-sha` and deployment
-logs. Fix the problem and push a newer commit. For a reviewed transient failure,
-run `sudo FORCE_DEPLOY=1 APP_SLUG=my-telegram-bot ./scripts/deploy.sh`.
+</details>
 
-**Timer is not loaded.** Run `sudo systemctl daemon-reload`, then
-`sudo systemctl enable --now my-telegram-bot-deploy.timer`. Check
-`systemctl list-timers` and the exact slug printed by the installer.
+## Before calling it production
 
-## Security notes
-
-- The container runs as UID/GID `10001`, with a read-only root filesystem,
-  dropped capabilities, `no-new-privileges`, a small `/tmp` tmpfs, and writable
-  mounts only for `data/` and `logs/`.
-- The health marker is ephemeral at `/tmp/telegram-bot.healthy`; persistent data
-  cannot accidentally make a dead process healthy.
-- The bot token is absent from the image and Git. Logging redacts token-shaped
-  strings, and console logs omit tracebacks.
-- Anyone able to merge to `main` can deploy code to the VPS. Protect `main`,
-  require CI, review dependency changes, and limit repository write access.
-- Rotate tokens after suspected exposure and keep Ubuntu and Docker patched.
-
-The shell deployment, installer, and rollback regression tests use fake
-`git`, `docker`, `systemctl`, and `flock` commands. They exercise transaction
-logic without contacting Telegram or changing the host. Before production use,
-run the [clean Ubuntu VPS acceptance checklist](docs/VPS_ACCEPTANCE.md) with
-dedicated test bots.
-
-## Customization checklist
-
-- [ ] Set the generated repository's description and topics shown above.
-- [ ] Confirm **Settings → Template repository** if this repository will itself
-      remain a reusable template.
-- [ ] Replace the example handlers and user-facing messages.
-- [ ] Add focused tests for every handler.
-- [ ] Set `APP_NAME` and `BOT_TOKEN` in the VPS `.env`.
+- [ ] Set a repository description and topics.
+- [ ] Enable **Template repository** if this repository remains a template.
 - [ ] Protect `main` and require the CI workflow.
-- [ ] Review `SECURITY.md`, ownership, and contact information.
-- [ ] Test a deployment and `scripts/rollback.sh` before relying on the bot.
-- [ ] Complete `docs/VPS_ACCEPTANCE.md` on a clean Ubuntu 22.04/24.04 VPS.
+- [ ] Replace the example messages and handlers.
+- [ ] Add tests for your bot behavior.
+- [ ] Set `APP_NAME` and `BOT_TOKEN` in the VPS `.env`.
+- [ ] Run the [clean Ubuntu VPS acceptance checklist](docs/VPS_ACCEPTANCE.md).
+- [ ] Test both automatic and manual rollback.
 
-## Limitations
+Suggested description:
 
-- One bot process, one container, one Ubuntu VPS, and long polling only.
-- Brief downtime is possible while Compose replaces the container.
-- Deployment depends on GitHub and Telegram being reachable from the VPS.
-- There is no cross-host failover, secret manager, backup system, or zero-downtime
-  handoff.
-- Docker image rollback cannot undo external side effects introduced by custom
-  handlers.
-- Automated tests do not replace an acceptance run against a real Docker and
-  systemd installation on the target Ubuntu VPS.
+> Production-ready Python Telegram bot template for a single VPS: Docker, CI,
+> push-to-main auto-deploy, health checks and automatic rollback.
+
+Suggested topics: `telegram-bot`, `telegram-bot-template`, `python`, `docker`,
+`vps`, `auto-deploy`, `systemd`, `devops`, `self-hosted`.
+
+## Honest limitations
+
+- One bot process, one Docker container, and one Ubuntu VPS.
+- Long polling only; no webhook mode.
+- A short interruption is possible while Compose replaces the container.
+- GitHub and Telegram must be reachable from the VPS.
+- There is no multi-host failover, secret manager, or zero-downtime handoff.
+- Image rollback cannot undo external side effects added by custom handlers.
+- Automated tests do not replace acceptance testing on your actual VPS.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Keep proposals aligned with a minimal
-single-bot, single-VPS scope and never include real tokens in tests or issues.
+Issues and focused pull requests are welcome. Please read
+[CONTRIBUTING.md](CONTRIBUTING.md) and never include bot tokens or unredacted
+production logs.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE).
