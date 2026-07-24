@@ -1,0 +1,34 @@
+name: Bug report
+description: Report a reproducible problem in the template or deployment tooling.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Never include BOT_TOKEN or unredacted logs containing secrets.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: List the smallest sequence of steps that reproduces the issue.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Ubuntu, Docker, Compose, and Python versions.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Redacted logs
+      render: shell

@@ -1,0 +1,34 @@
+name: ${APP_SLUG:-telegram-bot}
+
+services:
+  bot:
+    image: ${APP_SLUG:-telegram-bot}:local
+    build:
+      context: .
+    restart: unless-stopped
+    init: true
+    user: "10001:10001"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.healthcheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: 45s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
