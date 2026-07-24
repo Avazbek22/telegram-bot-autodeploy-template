@@ -10,6 +10,8 @@ All notable changes to this project are documented here.
 - Installer and manual rollback fake-command regression coverage now includes
   successful, repeated, and transactional failure paths.
 - GitHub Actions are pinned to reviewed commit SHAs.
+- Candidate image smoke tests no longer use the unsupported Compose
+  `run --no-build` flag, preserving compatibility with older Docker Compose v2.
 
 ## [0.1.0] - 2026-07-24
 
