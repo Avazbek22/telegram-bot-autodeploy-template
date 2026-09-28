@@ -12,3 +12,4 @@ data/*
 !data/.gitkeep
 logs/*
 !logs/.gitkeep
+.deploy/

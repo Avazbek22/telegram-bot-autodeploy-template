@@ -1,4 +1,12 @@
 #!/usr/bin/env bash
+# Runs every two minutes from the <slug>-deploy.timer systemd timer, and on
+# REBUILD_SCHEDULE from <slug>-rebuild.timer with --rebuild:
+#
+#   1. rolls a fresh release back if it turns unhealthy within WATCH_MINUTES;
+#   2. deploys the newest commit of DEPLOY_BRANCH once its CI checks pass;
+#   3. with --rebuild, rebuilds the running commit with fresh dependencies.
+#
+# Every step keeps the previous release ready and restores it on any failure.
 set -Eeuo pipefail
 
 ROOT_DIR="${ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
@@ -6,165 +14,153 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib-production.sh
 source "$SCRIPT_DIR/lib-production.sh"
 
-DEPLOY_BRANCH="main"
-old_commit=""
-target_commit=""
-deployment_started=0
-replacement_attempted=0
-previous_running=0
-units_changed=0
+retry=0
+skip_ci=0
 
-restore_container_state() {
-  if [[ "$replacement_attempted" != "1" ]]; then
+usage() {
+  cat <<'USAGE'
+Usage: sudo bash scripts/deploy.sh [--retry | --skip-ci | --rebuild]
+
+Deploys the newest commit of the deploy branch after its CI checks pass. The
+systemd timer already runs this every two minutes; run it by hand only to act
+immediately.
+
+  --retry    try again a commit that failed before
+  --skip-ci  deploy without waiting for CI checks
+  --rebuild  rebuild the running commit with fresh dependencies
+USAGE
+}
+
+# Rolls back a release that turns unhealthy while it is still fresh. Returns
+# non-zero after a rollback so that nothing else happens in this run.
+watch_fresh_release() {
+  local deployed_at now running health restarts image bad good
+  deployed_at="$(state_get current deployed_at)"
+  [[ "$deployed_at" =~ ^[0-9]+$ ]] || return 0
+  ((deployed_at > 0 && WATCH_MINUTES > 0)) || return 0
+  now="$(date +%s)"
+  ((now - deployed_at < WATCH_MINUTES * 60)) || return 0
+  [[ -f "$(state_file previous)" ]] || return 0
+
+  read -r running health restarts image < <(container_state) || true
+  # Leave containers alone that someone stopped or replaced by hand.
+  [[ "$image" == "$(state_get current image)" ]] || return 0
+  if [[ ! "$restarts" =~ ^[1-9] && ! ("$running" == "true" && "$health" == "unhealthy") ]]; then
     return 0
   fi
-  if [[ "$previous_running" == "1" ]]; then
-    compose -p "$COMPOSE_PROJECT" -f "$ROOT_DIR/docker-compose.yml" \
-      up -d --no-deps --force-recreate "$SERVICE_KEY"
-    wait_until_stable
-  else
-    compose -p "$COMPOSE_PROJECT" -f "$ROOT_DIR/docker-compose.yml" \
-      stop "$SERVICE_KEY"
-  fi
-}
 
-rollback_deployment() {
-  local exit_code="${1:-1}"
-  trap - ERR INT TERM
-  if [[ "$deployment_started" == "1" ]]; then
-    log "Deployment failed; restoring commit=$old_commit"
-    if docker_command image inspect "$ROLLBACK_IMAGE" >/dev/null 2>&1; then
-      if ! docker_command image tag "$ROLLBACK_IMAGE" "$IMAGE_NAME"; then
-        log "Rollback warning: previous image tag could not be restored"
-      fi
-    fi
-    if ! git -C "$ROOT_DIR" checkout -q -B "$DEPLOY_BRANCH" "$old_commit"; then
-      log "Rollback warning: Git checkout could not be restored"
-    fi
-    if [[ "$units_changed" == "1" ]]; then
-      if ! restore_systemd_units; then
-        log "Rollback warning: systemd units could not be restored"
-      fi
-    fi
-    if ! restore_container_state; then
-      log "Rollback warning: previous container state could not be restored"
-    fi
-    if [[ -n "$target_commit" ]]; then
-      printf '%s\n' "$target_commit" >"$FAILED_SHA_FILE"
-    fi
-    cleanup_systemd_backup
+  bad="$(state_get current commit)"
+  good="$(state_get previous commit)"
+  log "Release ${bad:0:7} became unhealthy after it started (health=$health restarts=$restarts); rolling back to ${good:0:7}"
+  if ! restore_release "$good" "$(state_get previous image)"; then
+    log "ERROR: ${good:0:7} did not become healthy either; the bot needs attention"
+    return 1
   fi
-  exit "$exit_code"
-}
-
-validate_checkout() {
-  [[ -d "$ROOT_DIR/.git" ]] || die "Not a Git checkout: $ROOT_DIR"
-  [[ -f "$ROOT_DIR/.env" ]] || die "Missing $ROOT_DIR/.env; run install.sh"
-  if [[ -n "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=no)" ]]; then
-    die "Tracked local changes detected; deployment refused"
-  fi
-  local branch
-  branch="$(git -C "$ROOT_DIR" branch --show-current)"
-  [[ "$branch" == "$DEPLOY_BRANCH" ]] ||
-    die "Production checkout must stay on branch $DEPLOY_BRANCH"
-}
-
-requires_container_update() {
-  local path
-  while IFS= read -r path; do
-    case "$path" in
-      README.md | docs/* | LICENSE | CONTRIBUTING.md | SECURITY.md | CHANGELOG.md | \
-        .github/* | tests/* | requirements-dev.txt | pyproject.toml | .gitattributes)
-        ;;
-      *)
-        return 0
-        ;;
-    esac
-  done < <(
-    git -C "$ROOT_DIR" diff --name-only --diff-filter=ACDMRTUXB \
-      "$old_commit" "$target_commit"
-  )
+  swap_current_and_previous
+  printf '%s\n' "$bad" >"$(state_file failed-commit)"
+  log "Rolled back to ${good:0:7}; ${bad:0:7} will be skipped until a newer commit arrives"
   return 1
 }
 
-systemd_templates_changed() {
-  git -C "$ROOT_DIR" diff --name-only "$old_commit" "$target_commit" -- \
-    scripts/systemd |
-    grep -q '^scripts/systemd/'
+deploy_new_commit() {
+  local head target output
+  if ! output="$(run_git fetch -q origin \
+    "+refs/heads/$DEPLOY_BRANCH:refs/remotes/origin/$DEPLOY_BRANCH" 2>&1)"; then
+    note_once fetch "Cannot fetch origin/$DEPLOY_BRANCH, will retry: ${output##*$'\n'}"
+    return 0
+  fi
+  clear_note fetch
+  head="$(run_git rev-parse HEAD)"
+  target="$(run_git rev-parse "refs/remotes/origin/$DEPLOY_BRANCH")"
+  if [[ "$head" == "$target" ]]; then
+    clear_note ci
+    clear_note skip
+    clear_note history
+    return 0
+  fi
+
+  if [[ "$retry" == "1" ]]; then
+    state_remove failed-commit interrupted ci-failed
+  fi
+  if [[ "$(state_read_line failed-commit)" == "$target" ]]; then
+    note_once skip "Commit ${target:0:7} failed before; waiting for a newer commit (sudo bash scripts/deploy.sh --retry tries it again)"
+    return 0
+  fi
+  clear_note skip
+  if ! run_git merge-base --is-ancestor "$head" "$target"; then
+    note_once history "origin/$DEPLOY_BRANCH was rewritten and no longer contains ${head:0:7}; automatic deployment is paused"
+    return 0
+  fi
+  clear_note history
+
+  if [[ "$skip_ci" != "1" ]]; then
+    ci_gate "$target"
+    [[ "$CI_DECISION" == "pass" ]] || return 0
+  fi
+  log "Deploying ${target:0:7}: $(commit_subject "$target")"
+  release_commit "$target" deploy
+  # The new commit may change the timers, for example REBUILD_SCHEDULE.
+  install_units || true
+}
+
+rebuild_running_commit() {
+  local head
+  head="$(run_git rev-parse HEAD)"
+  if [[ "$head" != "$(state_get current commit)" ]]; then
+    log "Checkout ${head:0:7} is not the running release; scheduled rebuild skipped"
+    return 0
+  fi
+  log "Rebuilding ${head:0:7} with fresh dependencies"
+  release_commit "$head" rebuild
+  install_units || true
 }
 
 main() {
-  mkdir -p "$ROOT_DIR/logs" "$ROOT_DIR/data"
+  local mode=deploy lock_wait=0
+  case "${1:-}" in
+    "") ;;
+    --retry) retry=1 ;;
+    --skip-ci) skip_ci=1 ;;
+    --rebuild)
+      mode=rebuild
+      lock_wait=1800
+      ;;
+    -h | --help)
+      usage
+      return 0
+      ;;
+    *)
+      usage >&2
+      return 2
+      ;;
+  esac
+
+  require_root
   resolve_app_slug
-  mkdir -p "$(dirname "$LOCK_FILE")"
-  find "$ROOT_DIR/logs" -maxdepth 1 -type f \
-    -name "$APP_SLUG-deploy-*.log" -mtime +60 -delete
-  exec >>"$ROOT_DIR/logs/$APP_SLUG-deploy-$(date -u '+%Y-%m-%d').log" 2>&1
-
-  command_exists flock || die "flock is required"
-  exec 9>"$LOCK_FILE"
-  if ! flock -n 9; then
-    log "Another deployment is active; skipping"
+  load_deploy_config
+  prepare_state_dir
+  open_log
+  if ! acquire_lock "$lock_wait"; then
+    log "Another deployment is running; skipping this run"
     return 0
   fi
-
-  detect_docker_access
-  validate_checkout
-  git -C "$ROOT_DIR" fetch -q origin \
-    "+refs/heads/$DEPLOY_BRANCH:refs/remotes/origin/$DEPLOY_BRANCH"
-  old_commit="$(git -C "$ROOT_DIR" rev-parse HEAD)"
-  target_commit="$(git -C "$ROOT_DIR" rev-parse "refs/remotes/origin/$DEPLOY_BRANCH")"
-
-  if [[ "$old_commit" == "$target_commit" ]]; then
-    log "No update: origin/main is already deployed"
+  # A paused checkout (edited files, another branch) is reported once.
+  validate_checkout || return 0
+  recover_interrupted_release
+  adopt_running_release
+  if [[ ! -f "$(state_file current)" ]]; then
+    note_once release "No running release is recorded; run install.sh first"
     return 0
   fi
-  if [[ "${FORCE_DEPLOY:-0}" != "1" && -f "$FAILED_SHA_FILE" ]] &&
-    [[ "$(tr -d '[:space:]' <"$FAILED_SHA_FILE")" == "$target_commit" ]]; then
-    log "Commit=$target_commit previously failed; waiting for a newer SHA"
-    return 0
-  fi
-  git -C "$ROOT_DIR" merge-base --is-ancestor "$old_commit" "$target_commit" ||
-    die "origin/main is not a fast-forward from commit=$old_commit"
+  clear_note release
+  watch_fresh_release || return 0
 
-  if ! requires_container_update; then
-    git -C "$ROOT_DIR" checkout -q -B "$DEPLOY_BRANCH" "$target_commit"
-    rm -f "$FAILED_SHA_FILE"
-    log "Docs-only deployment commit=$target_commit; container rebuild skipped"
-    return 0
+  # release_commit relies on its ERR trap, so it must not run inside a condition.
+  if [[ "$mode" == "rebuild" ]]; then
+    rebuild_running_commit
+  else
+    deploy_new_commit
   fi
-
-  docker_command image inspect "$IMAGE_NAME" >/dev/null 2>&1 ||
-    die "Current image $IMAGE_NAME is unavailable"
-  docker_command image tag "$IMAGE_NAME" "$ROLLBACK_IMAGE"
-  if container_is_running; then
-    previous_running=1
-  fi
-  if systemd_templates_changed; then
-    units_changed=1
-    backup_systemd_units
-  fi
-
-  deployment_started=1
-  trap 'rollback_deployment $?' ERR INT TERM
-  git -C "$ROOT_DIR" checkout -q -B "$DEPLOY_BRANCH" "$target_commit"
-  if [[ "$units_changed" == "1" ]]; then
-    install_systemd_units enable
-  fi
-  compose -p "$COMPOSE_PROJECT" -f "$ROOT_DIR/docker-compose.yml" \
-    build --pull "$SERVICE_KEY"
-  smoke_test_image
-  replacement_attempted=1
-  compose -p "$COMPOSE_PROJECT" -f "$ROOT_DIR/docker-compose.yml" \
-    up -d --no-deps --force-recreate "$SERVICE_KEY"
-  wait_until_stable
-
-  printf '%s\n' "$old_commit" >"$ROLLBACK_COMMIT_FILE"
-  rm -f "$FAILED_SHA_FILE"
-  deployment_started=0
-  trap - ERR INT TERM
-  cleanup_systemd_backup
-  log "Deployment successful commit=$target_commit"
 }
 
 main "$@"

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 TOKEN_PATTERN = re.compile(r"^[0-9]{5,20}:[A-Za-z0-9_-]{20,128}$")
+API_URL_PATTERN = re.compile(r"^https?://[^\s/?#]+(/[^\s?#]*)?$")
 LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"})
 
 
@@ -63,6 +64,13 @@ def _integer(
     return value
 
 
+def _api_url(source: Mapping[str, str]) -> str:
+    raw = _value(source, "TELEGRAM_API_URL").rstrip("/")
+    if raw and not API_URL_PATTERN.fullmatch(raw):
+        raise SettingsError("TELEGRAM_API_URL must be an http(s) URL")
+    return raw
+
+
 def _directory(source: Mapping[str, str], name: str, default: Path) -> Path:
     raw = _value(source, name)
     if "\x00" in raw:
@@ -78,8 +86,8 @@ class Settings:
     logs_dir: Path
     polling_timeout_seconds: int
     long_polling_timeout_seconds: int
-    health_heartbeat_seconds: int
     health_max_age_seconds: int
+    telegram_api_url: str = ""
 
     def validate_token(self) -> None:
         if not self.bot_token:
@@ -117,14 +125,13 @@ def load_settings(
         long_polling_timeout_seconds=_integer(
             source, "LONG_POLLING_TIMEOUT_SECONDS", 30, 1, 180
         ),
-        health_heartbeat_seconds=_integer(
-            source, "HEALTH_HEARTBEAT_SECONDS", 25, 5, 60
-        ),
         health_max_age_seconds=_integer(source, "HEALTH_MAX_AGE_SECONDS", 120, 30, 600),
+        telegram_api_url=_api_url(source),
     )
-    if settings.health_max_age_seconds <= settings.health_heartbeat_seconds * 2:
+    # A healthy bot completes getUpdates at least once per long-polling cycle.
+    if settings.health_max_age_seconds <= settings.long_polling_timeout_seconds * 2:
         raise SettingsError(
-            "HEALTH_MAX_AGE_SECONDS must exceed twice HEALTH_HEARTBEAT_SECONDS"
+            "HEALTH_MAX_AGE_SECONDS must exceed twice LONG_POLLING_TIMEOUT_SECONDS"
         )
     if require_token:
         settings.validate_token()

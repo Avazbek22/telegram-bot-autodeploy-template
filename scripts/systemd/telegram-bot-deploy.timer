@@ -1,11 +1,10 @@
 [Unit]
-Description=Check origin/main for __APP_SLUG__ updates
+Description=Check __APP_SLUG__ for new commits every two minutes
 
 [Timer]
-OnBootSec=2m
-OnUnitActiveSec=2m
+OnBootSec=2min
+OnUnitActiveSec=2min
 RandomizedDelaySec=20s
-Persistent=true
 Unit=__APP_SLUG__-deploy.service
 
 [Install]

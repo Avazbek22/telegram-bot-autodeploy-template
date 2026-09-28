@@ -4,6 +4,7 @@ import sys
 
 import telebot
 
+from app.application import configure_api_server
 from app.settings import load_settings
 
 
@@ -12,6 +13,7 @@ def main() -> int:
         return 1
     try:
         settings = load_settings(require_token=True)
+        configure_api_server(settings.telegram_api_url)
         bot = telebot.TeleBot(settings.bot_token)
         bot.get_me()
     except Exception:

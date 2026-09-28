@@ -2,7 +2,8 @@ name: ${APP_SLUG:-telegram-bot}
 
 services:
   bot:
-    image: ${APP_SLUG:-telegram-bot}:local
+    # Deployment builds candidates as :candidate; :local is the running release.
+    image: ${APP_SLUG:-telegram-bot}:${APP_IMAGE_TAG:-local}
     build:
       context: .
     restart: unless-stopped
@@ -20,7 +21,8 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    stop_grace_period: 30s
+    # Longer than one long-polling cycle, so shutdown never needs SIGKILL.
+    stop_grace_period: 45s
     healthcheck:
       test: ["CMD", "python", "-m", "app.healthcheck"]
       interval: 30s

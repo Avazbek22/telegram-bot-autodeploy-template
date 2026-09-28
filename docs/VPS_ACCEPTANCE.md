@@ -4,14 +4,14 @@ Use a disposable Ubuntu 22.04 or 24.04 VPS and dedicated test bot tokens. Do not
 reuse a production token or place tokens, IP addresses, or user data in notes,
 screenshots, commits, or issue reports.
 
-This checklist validates the real Docker, systemd, network, filesystem
-permissions, deployment, and rollback paths that fake-command tests cannot.
+This checklist validates what automated tests cannot: the real systemd, network,
+filesystem permissions, GitHub checks, and Telegram on your own server.
 
 ## 1. Clone and configure
 
 - [ ] Create a repository with **Use this template**.
-- [ ] Configure `origin`, protect `main`, and require the CI workflow manually.
-- [ ] Clone the generated repository on the VPS:
+- [ ] Protect `main` and require the CI workflow.
+- [ ] Clone the generated repository on the VPS as a regular user:
 
 ```bash
 git clone https://github.com/YOUR_ACCOUNT/YOUR_REPOSITORY.git
@@ -26,132 +26,140 @@ git remote -v
 ## 2. Initial installation
 
 ```bash
-./install.sh
+sudo bash install.sh
 ```
 
 - [ ] Enter a dedicated test bot token only at the hidden prompt.
-- [ ] Record the application slug printed by the installer.
-- [ ] Confirm `.env` exists with mode `0600`.
+- [ ] Note the application slug printed by the installer; `.env` now contains
+      `APP_SLUG`.
+- [ ] Confirm `.env` exists with mode `0600` and belongs to your user.
 - [ ] Confirm `data/` and `logs/` are owned by UID/GID `10001`.
+- [ ] Confirm `git status` and `git log` still work as your own user.
 
 ## 3. Container and health
 
-Replace `my-test-bot` with the printed slug:
-
 ```bash
-APP_SLUG=my-test-bot docker compose ps
-APP_SLUG=my-test-bot docker compose logs --tail=100 bot
-docker inspect --format \
-  '{{.State.Running}} {{.RestartCount}} {{.State.Health.Status}} {{.Config.User}}' \
-  "$(APP_SLUG=my-test-bot docker compose ps -q bot)"
+sudo bash scripts/status.sh
+docker compose logs --tail=100 bot
 ```
 
-- [ ] The container is running as `10001:10001`.
-- [ ] Restart count is `0`.
-- [ ] Health reaches `healthy`.
+- [ ] `status.sh` shows the running release with `running=true health=healthy
+      restarts=0`.
 - [ ] `/start`, `/help`, and text echo work with the test bot.
+- [ ] Both timers are listed: `<slug>-deploy.timer` and `<slug>-rebuild.timer`.
 
-## 4. systemd timer
+## 4. Deploy a new commit
+
+- [ ] Push a harmless handler change to `main` from the development machine.
+- [ ] While CI runs, `status.sh` shows the commit under "Waiting" and the
+      deploy log says it is waiting for CI checks.
+- [ ] A few minutes after CI passes, `status.sh` shows the new commit as
+      running and the previous one under "Previous".
+- [ ] The bot responds with the new behavior.
+
+## 5. Documentation-only commit
+
+- [ ] Push a README-only change.
+- [ ] `docker compose ps` shows the same container (not recreated), and
+      `status.sh` shows the new commit.
+
+## 6. Failed CI is never deployed
+
+- [ ] Push a commit whose tests fail.
+- [ ] The deploy log reports that CI failed; the running release is unchanged.
+- [ ] Fix the tests and push; the fixed commit is deployed.
+
+## 7. Broken release rollback
+
+Perform this only in the disposable acceptance repository. Push a commit with
+passing tests that crashes the bot at start, for example `raise SystemExit(3)`
+as the first line of `main()` in `main.py`.
+
+- [ ] The broken container is replaced by the previous release within about a
+      minute, and the bot keeps responding.
+- [ ] `status.sh` reports the broken commit as skipped.
+- [ ] Revert the change and push; the newer commit is deployed.
+
+## 8. Watch window
+
+Within ten minutes after a successful release, start the same test bot token
+on another machine (`python main.py`) so that Telegram answers the server's
+`getUpdates` with 409.
+
+- [ ] About two to three minutes later the server bot reports `unhealthy`.
+- [ ] The next timer run restores the previous release and the deploy log says
+      that the release became unhealthy after it started.
+- [ ] Stop the second instance.
+
+## 9. Manual rollback
 
 ```bash
-sudo systemctl status my-test-bot-deploy.timer
-sudo systemctl list-timers my-test-bot-deploy.timer
-sudo systemctl cat my-test-bot-deploy.service
-```
-
-- [ ] The timer is loaded, enabled, and active.
-- [ ] The service points to this repository and `origin/main`.
-
-## 5. Deploy a new commit
-
-- [ ] Push a harmless handler or documentation-plus-runtime test change to
-      `main` from the development machine.
-- [ ] Wait for the next timer check, normally about two minutes.
-
-```bash
-git rev-parse HEAD
-git rev-parse origin/main
-sudo systemctl status my-test-bot-deploy.service
-sudo tail -n 200 logs/my-test-bot-deploy-$(date -u +%F).log
-```
-
-- [ ] The checkout advances to `origin/main`.
-- [ ] Runtime changes create a new healthy container.
-- [ ] The bot still responds correctly.
-
-## 6. Broken deployment rollback
-
-Perform this only in the disposable acceptance repository. Push a commit to
-`main` that intentionally makes the Docker build fail, such as a temporary
-`RUN false` line in the Dockerfile.
-
-- [ ] The current healthy container remains available.
-- [ ] Git and the local image tag return to the previous deployment.
-- [ ] `data/.failed-deploy-sha` contains the broken commit.
-- [ ] The same SHA is not retried on the next timer run.
-- [ ] Revert the intentional failure, push the newer commit, and confirm a
-      successful deployment.
-
-## 7. Manual rollback
-
-After two successful runtime deployments:
-
-```bash
-sudo ./scripts/rollback.sh
-APP_SLUG=my-test-bot docker compose ps
-git rev-parse HEAD
+sudo bash scripts/rollback.sh
+sudo bash scripts/status.sh
 ```
 
 - [ ] The command asks for explicit confirmation.
-- [ ] The previous commit and image are restored.
-- [ ] The restored container reaches strict healthy state.
-- [ ] The rolled-away SHA is recorded and not immediately redeployed.
+- [ ] The previous commit and exact image are restored and reach healthy state.
+- [ ] The timer does not redeploy the rolled-back commit; the next push does.
+- [ ] Running `rollback.sh` again returns to the release that was replaced.
 
-## 8. Repeated installer and persistent state
+## 10. Scheduled rebuild
 
 ```bash
-sha256sum .env > /tmp/my-test-bot-env.before
-sudo touch data/acceptance-state
-sudo touch logs/acceptance-log
-./install.sh
-sha256sum --check /tmp/my-test-bot-env.before
-test -e data/acceptance-state
-test -e logs/acceptance-log
+sudo systemctl start <slug>-rebuild.service
+sudo tail -n 20 logs/<slug>-deploy-$(date -u +%F).log
 ```
 
-- [ ] The second installer run succeeds without asking for an existing token.
-- [ ] Custom `.env` values remain unchanged.
-- [ ] `data/` and `logs/` remain intact.
-- [ ] The same unique timer remains enabled.
-- [ ] Rollback commit and image state are available after an update.
+- [ ] With an unchanged base image, the log says the rebuild produced the same
+      image and the container keeps running.
+
+## 11. Repeated installer and persistent state
+
+```bash
+sha256sum .env > /tmp/acceptance-env.before
+sudo touch data/acceptance-state logs/acceptance-log
+sudo bash install.sh
+sha256sum --check /tmp/acceptance-env.before
+test -e data/acceptance-state && test -e logs/acceptance-log
+```
+
+- [ ] The second run succeeds without asking for the existing token and without
+      restarting an unchanged bot.
+- [ ] `.env`, `data/`, and `logs/` remain intact.
 
 Remove only the two acceptance marker files when finished.
 
-## 9. Two generated projects on one VPS
+## 12. Reboot during a deployment
 
-- [ ] Repeat the clone and installation with a second generated repository.
-- [ ] Use a different `APP_NAME` and a different dedicated test bot token.
-- [ ] Confirm different Compose projects, images, locks, containers, deployment
-      logs, services, and timers.
+- [ ] Push a runtime change and reboot the VPS while `status.sh` shows the
+      deployment in progress.
+- [ ] After the reboot the previous release runs, and the next timer run
+      deploys the commit again.
+
+## 13. Two generated projects on one VPS
+
+- [ ] Repeat the clone and installation with a second generated repository,
+      a different `APP_NAME`, and a different test bot token.
+- [ ] Confirm separate Compose projects, images, locks, containers, deploy
+      logs, and timers.
 
 ```bash
 docker ps --format '{{.Names}} {{.Image}}'
-systemctl list-timers '*-deploy.timer'
+systemctl list-timers '*-deploy.timer' '*-rebuild.timer'
 ```
 
-- [ ] Both bots remain healthy and respond independently.
+- [ ] Both bots remain healthy and deploy independently.
 
-## 10. Diagnostic collection
+## 14. Diagnostic collection
 
 Redact tokens, repository credentials, server addresses, and user data before
 sharing any output:
 
 ```bash
-APP_SLUG=my-test-bot docker compose ps
-APP_SLUG=my-test-bot docker compose logs --tail=200 bot
-sudo journalctl -u my-test-bot-deploy.service -n 200 --no-pager
-sudo systemctl status my-test-bot-deploy.timer --no-pager
-sudo tail -n 200 logs/my-test-bot-deploy-$(date -u +%F).log
+sudo bash scripts/status.sh
+docker compose logs --tail=200 bot
+sudo journalctl -u <slug>-deploy.service -n 200 --no-pager
+sudo tail -n 200 logs/<slug>-deploy-$(date -u +%F).log
 git status --short
 git log -5 --oneline
 docker info
