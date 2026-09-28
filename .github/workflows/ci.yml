@@ -36,13 +36,15 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: ShellCheck
-        run: shellcheck install.sh scripts/*.sh tests/shell/*.sh
+        run: shellcheck install.sh scripts/*.sh tests/shell/*.sh tests/e2e/*.sh
       - name: Deployment shell tests
         run: bash tests/shell/test-deploy.sh
       - name: Docker Compose configuration
         run: |
           test ! -e .env
           ENV_FILE=.env-example APP_SLUG=ci-telegram-bot docker compose config --quiet
+          ENV_FILE=.env-example APP_SLUG=ci-telegram-bot APP_IMAGE_TAG=candidate \
+            docker compose config | grep -q 'image: ci-telegram-bot:candidate'
           test ! -e .env
       - name: Build production image
         run: docker build --tag telegram-bot-template:ci .
@@ -61,3 +63,11 @@ jobs:
         run: |
           docker run --rm --read-only --user 0 --entrypoint sh telegram-bot-template:ci \
             -ec '! touch /root-filesystem-must-be-read-only 2>/dev/null'
+
+  end-to-end:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install, deploy, fail, and roll back with real Docker
+        run: sudo bash tests/e2e/run.sh

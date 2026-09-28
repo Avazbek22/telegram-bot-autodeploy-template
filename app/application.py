@@ -5,9 +5,10 @@ import threading
 from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 import telebot
+from telebot import apihelper
 
 from app.handlers import register_handlers
 from app.healthcheck import HEALTH_MARKER
@@ -19,6 +20,8 @@ LOGGER = logging.getLogger("telegram_bot.application")
 class BotProtocol(Protocol):
     def get_me(self) -> object: ...
 
+    def get_updates(self, *args: Any, **kwargs: Any) -> Any: ...
+
     def infinity_polling(
         self, *, timeout: int, long_polling_timeout: int
     ) -> object: ...
@@ -27,6 +30,13 @@ class BotProtocol(Protocol):
 
 
 BotFactory = Callable[[str], BotProtocol]
+
+
+def configure_api_server(api_url: str) -> None:
+    """Point telebot at a self-hosted Bot API server when one is configured."""
+    if api_url:
+        apihelper.API_URL = f"{api_url}/bot{{0}}/{{1}}"
+        apihelper.FILE_URL = f"{api_url}/file/bot{{0}}/{{1}}"
 
 
 class Application:
@@ -42,7 +52,6 @@ class Application:
         self.health_marker = health_marker
         self.bot: BotProtocol | None = None
         self.stop_event = threading.Event()
-        self.heartbeat_thread: threading.Thread | None = None
         self.active = False
         self.polling_finished_unexpectedly = False
 
@@ -51,21 +60,18 @@ class Application:
         self.settings.validate_token()
         self._prepare_directory(self.settings.data_dir)
         self._prepare_directory(self.settings.logs_dir)
+        configure_api_server(self.settings.telegram_api_url)
 
         bot = self.bot_factory(self.settings.bot_token)
         bot.get_me()
         register_handlers(bot)  # type: ignore[arg-type]
+        self._mark_healthy_after_each_poll(bot)
 
         self.bot = bot
         self.stop_event.clear()
         self.active = True
         self.polling_finished_unexpectedly = False
-        self.heartbeat_thread = threading.Thread(
-            target=self._heartbeat_loop,
-            name="health-heartbeat",
-            daemon=False,
-        )
-        self.heartbeat_thread.start()
+        # getMe has just proven the token and the network; polling keeps it fresh.
         self._write_health_marker()
         LOGGER.info("Startup completed; Telegram identity verified")
 
@@ -89,24 +95,26 @@ class Application:
         self.active = False
         if self.bot is not None:
             self.bot.stop_polling()
-        thread = self.heartbeat_thread
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=self.settings.health_heartbeat_seconds + 5)
-            if thread.is_alive():
-                LOGGER.error("Heartbeat thread did not stop in time")
         self._remove_health_marker()
         if not already_stopped:
             LOGGER.info("Shutdown completed")
 
-    def _heartbeat_loop(self) -> None:
-        interval = self.settings.health_heartbeat_seconds
-        while not self.stop_event.wait(interval):
-            if (
-                self.active
-                and not self.stop_event.is_set()
-                and not self.polling_finished_unexpectedly
-            ):
+    def _mark_healthy_after_each_poll(self, bot: BotProtocol) -> None:
+        """Keep the health marker fresh only while Telegram answers getUpdates.
+
+        A revoked token, a network outage, or a second instance polling the same
+        token (HTTP 409) stops these refreshes, so Docker reports the container
+        unhealthy and a fresh release is rolled back automatically.
+        """
+        get_updates = bot.get_updates
+
+        def get_updates_and_mark_healthy(*args: Any, **kwargs: Any) -> Any:
+            updates = get_updates(*args, **kwargs)
+            if self.active:
                 self._write_health_marker()
+            return updates
+
+        bot.get_updates = get_updates_and_mark_healthy  # type: ignore[method-assign]
 
     def _write_health_marker(self) -> None:
         self.health_marker.parent.mkdir(parents=True, exist_ok=True)

@@ -5,8 +5,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from telebot import apihelper
 
-from app.application import Application, create_application
+from app.application import Application, configure_api_server, create_application
 from app.settings import Settings
 
 VALID_TOKEN = "123456789:abcdefghijklmnopqrstuvwxyzABCDE"
@@ -19,6 +20,7 @@ class FakeBot:
         self.get_me_calls = 0
         self.poll_calls = 0
         self.stop_calls = 0
+        self.fail_polls = False
 
     def get_me(self) -> object:
         self.get_me_calls += 1
@@ -35,9 +37,16 @@ class FakeBot:
     def reply_to(self, message: object, text: str) -> None:
         del message, text
 
+    def get_updates(self, *args: Any, **kwargs: Any) -> list[object]:
+        del args, kwargs
+        if self.fail_polls:
+            raise ConnectionError("Conflict: terminated by other getUpdates request")
+        return []
+
     def infinity_polling(self, *, timeout: int, long_polling_timeout: int) -> None:
         del timeout, long_polling_timeout
         self.poll_calls += 1
+        self.get_updates(offset=1)
 
     def stop_polling(self) -> None:
         self.stop_calls += 1
@@ -51,7 +60,6 @@ def settings(tmp_path: Path) -> Settings:
         logs_dir=tmp_path / "logs",
         polling_timeout_seconds=20,
         long_polling_timeout_seconds=30,
-        health_heartbeat_seconds=5,
         health_max_age_seconds=120,
     )
 
@@ -89,8 +97,60 @@ def test_marker_removed_at_shutdown(tmp_path: Path) -> None:
     assert marker.is_file()
     application.stop()
     assert not marker.exists()
-    assert application.heartbeat_thread is not None
-    assert not application.heartbeat_thread.is_alive()
+
+
+def test_successful_poll_refreshes_health_marker(tmp_path: Path) -> None:
+    marker = tmp_path / "health"
+    bot = FakeBot(VALID_TOKEN)
+    application = create_application(
+        settings(tmp_path), bot_factory=lambda token: bot, health_marker=marker
+    )
+    application.startup()
+    try:
+        marker.unlink()
+        bot.get_updates(offset=1, timeout=20)
+        assert marker.is_file()
+    finally:
+        application.stop()
+
+
+def test_failed_poll_does_not_refresh_health_marker(tmp_path: Path) -> None:
+    marker = tmp_path / "health"
+    bot = FakeBot(VALID_TOKEN)
+    application = create_application(
+        settings(tmp_path), bot_factory=lambda token: bot, health_marker=marker
+    )
+    application.startup()
+    try:
+        marker.unlink()
+        bot.fail_polls = True
+        with pytest.raises(ConnectionError):
+            bot.get_updates(offset=1)
+        assert not marker.exists()
+    finally:
+        application.stop()
+
+
+def test_poll_after_shutdown_does_not_mark_healthy(tmp_path: Path) -> None:
+    marker = tmp_path / "health"
+    bot = FakeBot(VALID_TOKEN)
+    application = create_application(
+        settings(tmp_path), bot_factory=lambda token: bot, health_marker=marker
+    )
+    application.startup()
+    application.stop()
+    bot.get_updates(offset=1)
+    assert not marker.exists()
+
+
+def test_custom_bot_api_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(apihelper, "API_URL", None)
+    monkeypatch.setattr(apihelper, "FILE_URL", None)
+    configure_api_server("")
+    assert apihelper.API_URL is None
+    configure_api_server("http://bot-api:8081")
+    assert apihelper.API_URL == "http://bot-api:8081/bot{0}/{1}"
+    assert apihelper.FILE_URL == "http://bot-api:8081/file/bot{0}/{1}"
 
 
 def test_unexpected_polling_exit_is_unhealthy(tmp_path: Path) -> None:

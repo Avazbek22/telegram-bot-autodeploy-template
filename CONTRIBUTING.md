@@ -14,14 +14,16 @@ Create a virtual environment, install `requirements-dev.txt`, and run:
 python -m ruff check .
 python -m ruff format --check .
 python -m pytest
-shellcheck install.sh scripts/*.sh tests/shell/*.sh
+shellcheck install.sh scripts/*.sh tests/shell/*.sh tests/e2e/*.sh
 bash tests/shell/test-deploy.sh
 ENV_FILE=.env-example APP_SLUG=compose-check docker compose config --quiet
+bash tests/e2e/in-docker.sh
 ```
 
-Production shell changes should include a fake-command test for success and
-failure paths. The Compose check must not create `.env`. Never use a real
-Telegram token in tests or issue reports.
+Production shell changes should include a case in `tests/shell/test-deploy.sh`
+for the success and failure paths, and deployment behavior that depends on real
+Docker belongs in `tests/e2e/run.sh`. The Compose check must not create `.env`.
+Never use a real Telegram token in tests or issue reports.
 
 Open a focused pull request and explain deployment or rollback implications.
 By contributing, you agree that your contribution is licensed under the MIT

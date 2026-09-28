@@ -13,6 +13,8 @@ tests
 docs
 data
 logs
+.deploy
+deploy.conf
 install.sh
 Makefile
 CONTRIBUTING.md
