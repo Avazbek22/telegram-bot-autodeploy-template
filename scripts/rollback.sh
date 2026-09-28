@@ -38,7 +38,7 @@ main() {
   load_deploy_config
   prepare_state_dir
   open_log
-  acquire_lock || die "Another deployment is running; try again in a minute"
+  acquire_lock 0 || die "Another deployment is running; try again in a minute"
   validate_checkout || die "Automatic deployment is paused; fix the checkout first"
   recover_interrupted_release
   [[ -f "$(state_file previous)" ]] || die "No previous release is recorded yet"

@@ -139,7 +139,7 @@ main() {
   prepare_environment
   prepare_state_dir
   open_log
-  acquire_lock || die "Another deployment is running; try again in a minute"
+  acquire_lock 0 || die "Another deployment is running; try again in a minute"
   recover_interrupted_release
   adopt_running_release
   migrate_legacy_state
